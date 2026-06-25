@@ -252,14 +252,15 @@ class CardDB:
 
     def card(self, aid):
         c = self.cards.get(aid)
-        if c and not c["name"].startswith("#"):
-            return c                              # already resolved
-        mc = self.mtga.lookup(aid)                # MTGA DB (also upgrades stale #id placeholders)
+        # re-resolve placeholders AND old-format entries missing the draft-sort fields
+        if c and not c["name"].startswith("#") and "rarity" in c:
+            return c
+        mc = self.mtga.lookup(aid)                # MTGA DB: upgrades #id + stale entries
         if mc:
             self.cards[aid] = mc; self._dirty = True
             return mc
         if c:
-            return c                              # keep showing the placeholder
+            return c                              # keep showing what we have
         with self._lock: self._pending.add(aid)   # not in MTGA DB -> try Scryfall
         return None
 
@@ -1173,8 +1174,8 @@ class OnCardOverlay(QtWidgets.QWidget):
         self.payload = None
         self.guides = False
         g = cfg.setdefault("grid", {})         # GLOBAL screen pixels, calibratable
-        g.setdefault("x0", 250); g.setdefault("y0", 250)
-        g.setdefault("dx", 293); g.setdefault("dy", 333); g.setdefault("cols", 5)
+        g.setdefault("x0", 250); g.setdefault("y0", 250)   # position guess (monitor-dependent)
+        g.setdefault("dx", 262); g.setdefault("dy", 363); g.setdefault("cols", 5)  # ~2560x1440 spacing
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint
                             | QtCore.Qt.X11BypassWindowManagerHint
                             | QtCore.Qt.WindowTransparentForInput)   # never intercepts clicks
