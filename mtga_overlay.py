@@ -100,8 +100,9 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 # window classes that count as "Arena" for show-only-over-Arena behavior
 ARENA_MATCH = ("mtga", "2141910", "magic")
 
-VERSION = "1.4"
+VERSION = "1.5"
 CHANGES = [
+    "1.5  deck-builder mana base: per-color land source counts (parsed from each land's actual mana abilities)",
     "1.4  full-history 17Lands data + robust name matching; refresh draft as ratings load async",
     "1.3  EXPERIMENTAL on-card draft ratings: win rate stamped on each card (right-click ▸ Experiments)",
     "1.2  auto-detect Player.log and MTGA card DB across Steam install types (Flatpak/native/extra drives)",
@@ -202,6 +203,42 @@ class MtgaDB:
             else: cmc += 1
         return "".join(out), cmc
 
+    @staticmethod
+    def _loc(cur, tid):
+        r = cur.execute("SELECT Loc FROM Localizations_enUS WHERE LocId=? "
+                        "ORDER BY Formatted LIMIT 1", (tid,)).fetchone()
+        return r[0] if r else None
+
+    def _produces(self, cur, abil, cil, is_land):
+        """Colors of mana this card can tap for, as a WUBRGC subset string.
+        Reads each ability's text ("…Add {oG}") so duals/triples/any-color lands
+        and mana dorks resolve precisely; basics (no ability) fall back to color
+        identity; 'becomes a basic land type' lands count as all colors."""
+        prod, texts = set(), []
+        for pair in (abil or "").split(","):
+            base = pair.split(":")[0]
+            if not base.isdigit():
+                continue
+            ar = cur.execute("SELECT TextId FROM Abilities WHERE Id=?", (int(base),)).fetchone()
+            if not ar:
+                continue
+            t = self._loc(cur, ar[0]) or ""
+            texts.append(t)
+            i = t.find("Add")
+            if i < 0:
+                continue
+            seg = t[i:]                                   # only the produce clause
+            if "any color" in seg.lower():
+                prod.update("WUBRG")
+            for s in re.findall(r"o([WUBRGC])", seg):     # {oW}, {oWoU}, {oCoC}, …
+                prod.add(s)
+        if is_land and not (prod & set("WUBRG")):
+            if "basic land type" in " ".join(texts).lower():
+                prod.update("WUBRG")                       # e.g. Multiversal Passage
+            else:
+                prod.update(cil)                           # basics / intrinsic mana
+        return "".join(c for c in "WUBRGC" if c in prod)
+
     def lookup(self, grp):
         if not self.con:
             return None
@@ -209,19 +246,21 @@ class MtgaDB:
             with self.lock:
                 cur = self.con.cursor()
                 row = cur.execute("SELECT TitleId,Types,ColorIdentity,OldSchoolManaText,"
-                                  "Rarity,Colors,CollectorNumber "
+                                  "Rarity,Colors,CollectorNumber,AbilityIds "
                                   "FROM Cards WHERE GrpId=?", (grp,)).fetchone()
                 if not row:
                     return None
-                tid, types, ci, m, rarity, colors, cn = row
+                tid, types, ci, m, rarity, colors, cn, abil = row
                 nm = cur.execute("SELECT Loc FROM Localizations_enUS WHERE LocId=? "
                                  "ORDER BY Formatted LIMIT 1", (tid,)).fetchone()
+                tv = set(int(x) for x in (types or "").split(",") if x.strip().isdigit())
+                is_land = 5 in tv
+                cil = [self.COLORS[int(x)] for x in (ci or "").split(",")
+                       if x.strip().isdigit() and int(x) in self.COLORS]
+                prod = self._produces(cur, abil, cil, is_land)
         except Exception:
             return None
-        tv = set(int(x) for x in (types or "").split(",") if x.strip().isdigit())
-        typ = "Land" if 5 in tv else "Creature" if 2 in tv else "Spell"
-        cil = [self.COLORS[int(x)] for x in (ci or "").split(",")
-               if x.strip().isdigit() and int(x) in self.COLORS]
+        typ = "Land" if is_land else "Creature" if 2 in tv else "Spell"
         ms, cmc = self._mana(m or "")
         try:
             cnv = int(re.sub(r"\D", "", str(cn)) or 0)
@@ -229,7 +268,8 @@ class MtgaDB:
             cnv = 0
         return {"name": nm[0] if nm else f"#{grp}", "ci": cil,
                 "type": typ, "cmc": cmc, "mana": ms, "img": None,
-                "rarity": int(rarity or 0), "colors": colors or "", "cn": cnv}
+                "rarity": int(rarity or 0), "colors": colors or "", "cn": cnv,
+                "prod": prod}
 
 
 class CardDB:
@@ -253,8 +293,9 @@ class CardDB:
 
     def card(self, aid):
         c = self.cards.get(aid)
-        # re-resolve placeholders AND old-format entries missing the draft-sort fields
-        if c and not c["name"].startswith("#") and "rarity" in c:
+        # re-resolve placeholders AND old-format entries missing newer fields
+        # (rarity = draft sort; prod = mana sources)
+        if c and not c["name"].startswith("#") and "rarity" in c and "prod" in c:
             return c
         mc = self.mtga.lookup(aid)                # MTGA DB: upgrades #id + stale entries
         if mc:
@@ -554,6 +595,8 @@ class MatchState:
         self.my_seat = None
         self.deck_ids = Counter()
         self.draft = None
+        self.scene = None            # last UI scene (e.g. "DeckBuilder")
+        self.builder = None          # deck currently open in the deck builder
         self.reset_game()
 
     def reset_game(self):
@@ -567,6 +610,30 @@ class MatchState:
                 self.my_seat = node["systemSeatIds"][0]
                 self.draft = None                      # entered a match -> not drafting
                 self.reset_game()
+            # UI scene tracking (so the mana-base panel only shows in the deck builder)
+            sc = node.get("toSceneName")
+            if sc and sc != self.scene:
+                self.scene = sc; changed = True
+            # deck currently being edited/saved in the deck builder (auto-saved as DeckUpsertDeckV3)
+            req = node.get("request")
+            if isinstance(req, str) and "MainDeck" in req:
+                try:
+                    inner = json.loads(req)
+                except Exception:
+                    inner = None
+                md = ((inner or {}).get("Deck") or {}).get("MainDeck") if isinstance(inner, dict) else None
+                if isinstance(md, list):
+                    ids = Counter()
+                    for e in md:
+                        try:
+                            ids[int(e["cardId"])] += int(e["quantity"])
+                        except Exception:
+                            pass
+                    summ = inner.get("Summary") or {}
+                    fmt = next((a.get("value", "") for a in (summ.get("Attributes") or [])
+                                if a.get("name") == "Format"), "")
+                    self.builder = {"name": summ.get("Name", ""), "format": fmt, "ids": ids}
+                    changed = True
             if node.get("CurrentModule") == "BotDraft" and isinstance(node.get("Payload"), str):
                 try:
                     pl = json.loads(node["Payload"])
@@ -644,9 +711,33 @@ class MatchState:
         return {"set": setc, "pack_num": self.draft.get("pack_num"),
                 "pick_num": self.draft.get("pick_num"), "cards": cards, "ordered": ordered}
 
+    def sources(self, carddb):
+        """Per-color mana SOURCE counts from the deck-builder deck's land base only
+        (lands only, by request). A dual counts toward both its colors."""
+        if not self.builder:
+            return None
+        ids = self.builder["ids"]
+        counts = {c: 0 for c in "WUBRG"}
+        cless = lands = nonland = 0
+        for aid, q in ids.items():
+            c = carddb.card(aid)
+            if not c or c.get("type") != "Land":
+                nonland += q; continue
+            lands += q
+            prod = c.get("prod", "") or ""
+            for ch in "WUBRG":
+                if ch in prod: counts[ch] += q
+            if "C" in prod: cless += q
+        return {"name": self.builder.get("name", ""), "format": self.builder.get("format", ""),
+                "counts": counts, "colorless": cless, "lands": lands,
+                "nonland": nonland, "total": sum(ids.values())}
+
+    def view(self, carddb):
+        return {"scene": self.scene, "data": self.sources(carddb)}
+
 
 class LogReader(QtCore.QThread):
-    updated = QtCore.Signal(list, list, object)
+    updated = QtCore.Signal(list, list, object, object)
 
     def __init__(self, path, carddb, ratings):
         super().__init__()
@@ -670,7 +761,7 @@ class LogReader(QtCore.QThread):
                 for obj_str, end in iter_json_objects(buf):
                     if any(k in obj_str for k in
                            ("greToClientEvent", "gameStateMessage", "deckMessage",
-                            "systemSeatIds", "BotDraft")):
+                            "systemSeatIds", "BotDraft", "MainDeck", "toSceneName")):
                         try:
                             changed |= self.state.feed(json.loads(obj_str), self.carddb)
                         except Exception:
@@ -684,7 +775,8 @@ class LogReader(QtCore.QThread):
             if changed or refresh:
                 self.updated.emit(self.state.remaining(self.carddb),
                                   self.state.opponent(self.carddb),
-                                  self.state.draft_payload(self.carddb, self.ratings))
+                                  self.state.draft_payload(self.carddb, self.ratings),
+                                  self.state.view(self.carddb))
             time.sleep(0.7)
 
 
@@ -1180,6 +1272,163 @@ class DraftPanel(QtWidgets.QWidget):
         save_config()
 
 
+class SourcesPanel(QtWidgets.QWidget):
+    """In the deck builder: how many SOURCES of each color the land base provides.
+    A dual land counts toward both its colors. Updates as Arena auto-saves the deck."""
+    COLOR_NAME = {"W": "White", "U": "Blue", "B": "Black", "R": "Red", "G": "Green", "C": "Colorless"}
+
+    def __init__(self, cfg, ms):
+        super().__init__()
+        self.cfg = cfg
+        self.ms = ms                     # shared ManaSymbols (real Scryfall SVGs)
+        self.view = None                 # {"scene":…, "data":…}
+        self.width_px = 214
+        self.collapsed = cfg.get("collapsed", False)
+        self._opacity = cfg.get("opacity", 1.0)
+        self._press = None; self._dragging = False
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint
+                            | QtCore.Qt.X11BypassWindowManagerHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setMouseTracking(True); self.setWindowOpacity(self._opacity)
+        self.move(cfg.get("x", 40), cfg.get("y", 80))
+        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Q"), self, QtWidgets.QApplication.quit)
+        self.relayout()
+
+    @QtCore.Slot(object)
+    def set_view(self, view):
+        self.view = view; self.relayout()
+
+    def in_builder(self):
+        return bool(self.view) and self.view.get("scene") == "DeckBuilder"
+
+    def _data(self):
+        return self.view.get("data") if self.view else None
+
+    def _active_colors(self):
+        d = self._data()
+        if not d: return []
+        rows = [c for c in "WUBRG" if d["counts"].get(c)]
+        if d.get("colorless"): rows.append("C")
+        return rows
+
+    def relayout(self):
+        if self.collapsed:
+            h = HEAD_H
+        else:
+            rows = self._active_colors()
+            body = (ROW_H * len(rows) + 18) if rows else ROW_H
+            h = HEAD_H + PAD + body + PAD
+        self.setFixedSize(self.width_px + 2 * OUTER, int(h) + 2 * OUTER)
+        self.update()
+
+    def paintEvent(self, _):
+        W = self.width_px
+        p = QtGui.QPainter(self); p.setRenderHint(QtGui.QPainter.Antialiasing)
+        panel = QtCore.QRectF(OUTER, OUTER, W, self.height() - 2 * OUTER)
+        for i in range(OUTER, 0, -1):
+            p.setPen(QtCore.Qt.NoPen); p.setBrush(QtGui.QColor(0, 0, 0, 7))
+            p.drawRoundedRect(panel.adjusted(-i, -i + 2, i, i + 2), 12 + i, 12 + i)
+        grad = QtGui.QLinearGradient(panel.topLeft(), panel.bottomLeft())
+        grad.setColorAt(0, BG2); grad.setColorAt(1, BG)
+        p.setBrush(grad); p.setPen(QtGui.QPen(BORDER, 1)); p.drawRoundedRect(panel, 11, 11)
+
+        x = OUTER + 12
+        d = self._data()
+        p.setPen(QtCore.Qt.NoPen); p.setBrush(PIP["M"])
+        p.drawEllipse(QtCore.QRectF(x, OUTER + 12, 7, 7))
+        p.setFont(QtGui.QFont("Sans", 10, QtGui.QFont.Bold)); p.setPen(TEXT)
+        p.drawText(x + 14, OUTER + 21, "Mana Base")
+        if d:
+            p.setPen(TEXT_DIM); p.setFont(QtGui.QFont("Sans", 9))
+            p.drawText(QtCore.QRectF(OUTER, OUTER, W - 30, HEAD_H),
+                       QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, f"{d['lands']} lands")
+        p.setPen(SECTION)
+        p.drawText(QtCore.QRectF(OUTER, OUTER, W - 12, HEAD_H),
+                   QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, "▸" if self.collapsed else "▾")
+        if self.collapsed:
+            return
+        p.setPen(QtGui.QPen(BORDER, 1))
+        p.drawLine(OUTER + 10, OUTER + HEAD_H, OUTER + W - 10, OUTER + HEAD_H)
+
+        y = OUTER + HEAD_H + PAD + 4
+        rows = self._active_colors()
+        if not d or not rows:
+            p.setFont(QtGui.QFont("Sans", 9)); p.setPen(TEXT_DIM)
+            msg = "Edit a deck to see its mana sources" if not d else "No lands in this deck yet"
+            p.drawText(QtCore.QRectF(x, y, W - 24, ROW_H),
+                       QtCore.Qt.AlignVCenter, msg)
+            return
+        counts = dict(d["counts"]); counts["C"] = d.get("colorless", 0)
+        mx = max((counts[c] for c in rows), default=1) or 1
+        bar_x = x + 86
+        bar_w = OUTER + W - 12 - bar_x
+        for c in rows:
+            n = counts[c]
+            sym = QtCore.QRectF(x, y + 2, 16, 16)
+            r = self.ms.renderer(c) if self.ms else None
+            if r is not None:
+                r.render(p, sym)                       # real {W}/{U}/… mana symbol
+            else:
+                p.setPen(QtCore.Qt.NoPen); p.setBrush(PIP[c])
+                p.drawEllipse(QtCore.QRectF(x, y + 3, 15, 15))   # fallback until SVG loads
+            p.setPen(TEXT); p.setFont(QtGui.QFont("Sans", 9))
+            p.drawText(x + 22, y + 14, self.COLOR_NAME[c])
+            # bar
+            p.setPen(QtCore.Qt.NoPen); p.setBrush(QtGui.QColor(255, 255, 255, 20))
+            p.drawRoundedRect(QtCore.QRectF(bar_x, y + 6, bar_w, 8), 3, 3)
+            bc = QtGui.QColor(PIP[c]);
+            p.setBrush(bc)
+            p.drawRoundedRect(QtCore.QRectF(bar_x, y + 6, bar_w * n / mx, 8), 3, 3)
+            p.setPen(TEXT); p.setFont(QtGui.QFont("Sans", 9, QtGui.QFont.Bold))
+            p.drawText(QtCore.QRectF(x + 58, y, 26, ROW_H),
+                       QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, str(n))
+            y += ROW_H
+        # footer
+        p.setPen(TEXT_DIM); p.setFont(QtGui.QFont("Sans", 8))
+        foot = f"{d['lands']} lands · {d['total']} cards"
+        if d.get("format"): foot += f" · {d['format']}"
+        p.drawText(x, y + 12, foot)
+
+    # ---- interaction (drag / collapse / opacity), mirrors the other panels
+    def _in_header(self, pos): return pos.y() <= OUTER + HEAD_H
+
+    def mousePressEvent(self, e):
+        if e.button() == QtCore.Qt.LeftButton:
+            self._press = e.globalPosition().toPoint(); self._press_local = e.position().toPoint()
+            self._win = self.frameGeometry().topLeft(); self._dragging = False
+
+    def mouseMoveEvent(self, e):
+        if self._press is not None:
+            dlt = e.globalPosition().toPoint() - self._press
+            if self._dragging or dlt.manhattanLength() > 6:
+                self._dragging = True; self.move(self._win + dlt)
+
+    def mouseReleaseEvent(self, e):
+        if self._press is not None and not self._dragging and self._in_header(self._press_local):
+            self.collapsed = not self.collapsed; self.relayout()
+        self._press = None; self._dragging = False; self._save()
+
+    def wheelEvent(self, e):
+        self._opacity = max(0.35, min(1.0, self._opacity + (0.05 if e.angleDelta().y() > 0 else -0.05)))
+        self.setWindowOpacity(self._opacity); self._save()
+
+    def contextMenuEvent(self, e):
+        m = QtWidgets.QMenu(self); a = m.addAction("Reset opacity")
+        m.addSeparator(); q = m.addAction("Quit")
+        act = m.exec(e.globalPos())
+        if act == a: self._opacity = 1.0; self.setWindowOpacity(1.0)
+        elif act == q: QtWidgets.QApplication.quit()
+        self._save()
+
+    def _save(self):
+        self.cfg.update({"x": self.x(), "y": self.y(), "collapsed": self.collapsed,
+                         "opacity": self._opacity})
+        save_config()
+
+    def closeEvent(self, e):
+        self._save(); super().closeEvent(e)
+
+
 class OnCardOverlay(QtWidgets.QWidget):
     """EXPERIMENTAL: stamps the win rate onto each card in the draft pack, using the
     verified display sort to know each card's grid position. ALWAYS click-through
@@ -1363,6 +1612,7 @@ def main():
         _CONFIG = {}
     _CONFIG.setdefault("deck", {}); _CONFIG.setdefault("opp", {}); _CONFIG.setdefault("draft", {})
     _CONFIG.setdefault("experiments", {}); _CONFIG.setdefault("oncard", {})
+    _CONFIG.setdefault("sources", {})
 
     global _ONCARD, _CALIB
     app = QtWidgets.QApplication(sys.argv)
@@ -1375,11 +1625,17 @@ def main():
         _CONFIG["draft"]["x"] = _CONFIG["deck"]["x"]
         _CONFIG["draft"]["y"] = _CONFIG["deck"].get("y", 80)
     draft = DraftPanel(carddb, imgcache, popup, _CONFIG["draft"])
+    # first run: place the mana-base panel where the deck tracker lives
+    if "x" not in _CONFIG["sources"] and "x" in _CONFIG["deck"]:
+        _CONFIG["sources"]["x"] = _CONFIG["deck"]["x"]
+        _CONFIG["sources"]["y"] = _CONFIG["deck"].get("y", 80)
+    sources = SourcesPanel(_CONFIG["sources"], mana)
     oncard = OnCardOverlay(_CONFIG["oncard"]); _ONCARD = oncard
     _CALIB = CalibrationControl(_CONFIG["oncard"], oncard)
     reader = LogReader(args.log, carddb, ratings)
-    reader.updated.connect(lambda d, o, dr: (deck.set_rows(d), opp.set_rows(o),
-                                             draft.set_draft(dr), oncard.set_payload(dr)))
+    reader.updated.connect(lambda d, o, dr, vw: (deck.set_rows(d), opp.set_rows(o),
+                                                 draft.set_draft(dr), oncard.set_payload(dr),
+                                                 sources.set_view(vw)))
     reader.start()
 
     # only visible while Arena is focused; draft panel during a draft, deck/opp during a match
@@ -1392,9 +1648,11 @@ def main():
     def update_visibility():
         arena = active_window_is_arena()
         drafting = draft.has_cards()
-        setvis(deck, arena and not drafting)
-        setvis(opp, arena and not drafting)
+        in_builder = sources.in_builder()
+        setvis(deck, arena and not drafting and not in_builder)
+        setvis(opp, arena and not drafting and not in_builder)
         setvis(draft, arena and drafting)
+        setvis(sources, arena and in_builder)
         # on-card overlay (experimental): over the pack while drafting, or anytime when calibrating
         show_oncard = (arena and drafting and experiment("on_card_ratings")) or oncard.guides
         if show_oncard and not oncard.isVisible():

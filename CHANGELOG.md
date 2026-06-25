@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5
+- Deck-builder **mana base** panel: per-color count of land sources, shown while you edit a deck
+- Sources are parsed from each land's actual mana abilities (duals count for both colors; "any color" and "becomes a basic land type" lands count for all five), not guessed from color identity
+- Library/Opponent panels now hide while you're in the deck builder
+
+## 1.4
+- Full-history 17Lands data + robust name matching; draft refreshes as ratings load
+
 ## 1.3
 - EXPERIMENTAL on-card draft ratings (win rate stamped on each card, with calibration)
 

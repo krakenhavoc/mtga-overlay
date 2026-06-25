@@ -24,6 +24,10 @@ it's built around the things that actually work on Linux, not the ones that don'
 - **Opponent panel** — cards your opponent has revealed this game
 - **Hover any card** for its full art
 
+**Deck builder**
+- **Mana base** panel — per-color count of land sources in the deck you're editing, updating as Arena auto-saves
+- Sources come from each land's *actual* mana abilities (a dual counts for both colors; "any color" and "becomes a basic land type" lands count for all five) — not a color-identity guess
+
 **Draft assistant**
 - Ranks each pack by **17Lands** games-in-hand win rate, best pick highlighted
 - Works for any set — card names come from MTGA's own DB, so even day-one releases resolve
@@ -45,8 +49,8 @@ it's built around the things that actually work on Linux, not the ones that don'
 ## Install & run
 
 ```bash
-git clone https://github.com/krakenhavoc/mtga-linux-overlay.git
-cd mtga-linux-overlay
+git clone https://github.com/krakenhavoc/mtga-overlay.git
+cd mtga-overlay
 ./run.sh        # first run sets up a venv + PySide6, then launches
 ```
 
