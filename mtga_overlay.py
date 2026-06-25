@@ -1642,6 +1642,13 @@ def main():
     def setvis(w, v):
         if v and not w.isVisible():
             w.show(); w.raise_()
+            # XWayland (esp. with fractional scaling) can ignore a move() made
+            # while the window was still hidden, snapping a saved position back
+            # onto the primary monitor. Re-apply it now that the window is
+            # mapped so panels land — and stay — on a secondary monitor.
+            c = getattr(w, "cfg", None)
+            if c and "x" in c:
+                w.move(c["x"], c.get("y", w.y()))
         elif not v and w.isVisible():
             w.hide()
 
