@@ -100,8 +100,9 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 # window classes that count as "Arena" for show-only-over-Arena behavior
 ARENA_MATCH = ("mtga", "2141910", "magic")
 
-VERSION = "1.3"
+VERSION = "1.4"
 CHANGES = [
+    "1.4  full-history 17Lands data (fixes sparse ratings for older sets) + robust name matching",
     "1.3  EXPERIMENTAL on-card draft ratings: win rate stamped on each card (right-click ▸ Experiments)",
     "1.2  auto-detect Player.log and MTGA card DB across Steam install types (Flatpak/native/extra drives)",
     "1.1  experimental-features framework (right-click ▸ Experiments); draft panel position fix",
@@ -378,6 +379,10 @@ class Ratings:
         self.pending, self.lock = set(), threading.Lock()
         threading.Thread(target=self._worker, daemon=True).start()
 
+    @staticmethod
+    def _norm(s):
+        return re.sub(r"\s+", " ", (s or "").replace("’", "'").replace("`", "'").strip().lower())
+
     def winrate(self, setc, name):
         if not setc:
             return None
@@ -385,12 +390,12 @@ class Ratings:
         if m is None:
             self._ensure(setc)
             return None
-        return m.get(name)
+        return m.get(self._norm(name))
 
     def _ensure(self, setc):
         if setc in self.data:
             return
-        f = RATINGS_DIR / f"{setc}_{self.FORMAT}.json"
+        f = RATINGS_DIR / f"{setc}_{self.FORMAT}_full.json"
         if f.exists():
             try:
                 self.data[setc] = json.loads(f.read_text()); return
@@ -406,14 +411,18 @@ class Ratings:
             if setc is None:
                 time.sleep(0.3); continue
             try:
+                # explicit full-history date range: an older set may have sparse data in
+                # 17Lands' default (recent) window, so pull everything since 2019.
+                today = time.strftime("%Y-%m-%d")
                 url = (f"https://www.17lands.com/card_ratings/data?"
-                       f"expansion={setc}&format={self.FORMAT}")
+                       f"expansion={setc}&format={self.FORMAT}"
+                       f"&start_date=2019-01-01&end_date={today}")
                 req = urllib.request.Request(url, headers={"User-Agent": "mtga-linux-overlay/1.0"})
                 arr = json.loads(urllib.request.urlopen(req, timeout=25).read())
-                m = {c["name"]: c["ever_drawn_win_rate"] for c in arr
+                m = {self._norm(c["name"]): c["ever_drawn_win_rate"] for c in arr
                      if c.get("name") and c.get("ever_drawn_win_rate")}
                 self.data[setc] = m
-                (RATINGS_DIR / f"{setc}_{self.FORMAT}.json").write_text(json.dumps(m))
+                (RATINGS_DIR / f"{setc}_{self.FORMAT}_full.json").write_text(json.dumps(m))
                 print(f"[ratings] loaded {len(m)} cards for {setc}")
             except Exception as e:
                 print(f"[ratings] {setc} failed: {e}")
