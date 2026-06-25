@@ -1,7 +1,14 @@
 # MTGA Linux Overlay
 
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Platform: Linux](https://img.shields.io/badge/platform-Linux-informational)
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)
+
 A native, transparent **MTG Arena deck tracker and draft assistant for Linux** — built
 because every existing tracker is either Windows-only (and breaks under Wine) or abandoned.
+
+> Includes something no other Linux MTGA tool offers: **on-card draft ratings** — 17Lands
+> win rates stamped onto each card in the pack.
 
 It runs as a real Linux (Qt) window, so it draws transparently over Arena with no Wine
 rendering tricks, and it reads everything from MTGA's `Player.log` plus MTGA's own card
@@ -38,7 +45,7 @@ it's built around the things that actually work on Linux, not the ones that don'
 ## Install & run
 
 ```bash
-git clone <your-repo-url> mtga-linux-overlay
+git clone https://github.com/krakenhavoc/mtga-linux-overlay.git
 cd mtga-linux-overlay
 ./run.sh        # first run sets up a venv + PySide6, then launches
 ```
