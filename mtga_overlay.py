@@ -1165,34 +1165,26 @@ class DraftPanel(QtWidgets.QWidget):
 
 class OnCardOverlay(QtWidgets.QWidget):
     """EXPERIMENTAL: stamps the win rate onto each card in the draft pack, using the
-    verified display sort to know each card's grid position. Click-through during play;
-    a calibration mode (right-click ▸ Experiments ▸ Calibrate) aligns the grid."""
+    verified display sort to know each card's grid position. ALWAYS click-through
+    (never grabs input); a small CalibrationControl window aligns the grid."""
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         self.payload = None
-        self.calibrating = False
-        # grid in GLOBAL screen pixels (calibratable). Defaults tuned for ~2560x1440.
-        g = cfg.setdefault("grid", {})
+        self.guides = False
+        g = cfg.setdefault("grid", {})         # GLOBAL screen pixels, calibratable
         g.setdefault("x0", 250); g.setdefault("y0", 250)
         g.setdefault("dx", 293); g.setdefault("dy", 333); g.setdefault("cols", 5)
-        self._origin = QtCore.QPoint(0, 0)
-        self._build()
-        self._t = QtCore.QTimer(self); self._t.timeout.connect(self.update); self._t.start(800)
-
-    def _build(self):
-        flags = (QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint
-                 | QtCore.Qt.X11BypassWindowManagerHint)
-        if not self.calibrating:
-            flags |= QtCore.Qt.WindowTransparentForInput     # click-through while playing
-        self.setWindowFlags(flags)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint
+                            | QtCore.Qt.X11BypassWindowManagerHint
+                            | QtCore.Qt.WindowTransparentForInput)   # never intercepts clicks
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setFocusPolicy(QtCore.Qt.StrongFocus if self.calibrating else QtCore.Qt.NoFocus)
         geo = QtCore.QRect()
         for s in QtWidgets.QApplication.screens():
             geo = geo.united(s.geometry())
         self._origin = geo.topLeft()
         self.setGeometry(geo)
+        self._t = QtCore.QTimer(self); self._t.timeout.connect(self.update); self._t.start(800)
 
     @QtCore.Slot(object)
     def set_payload(self, payload):
@@ -1201,16 +1193,6 @@ class OnCardOverlay(QtWidgets.QWidget):
     def has_cards(self):
         return bool(self.payload and self.payload.get("ordered"))
 
-    def set_calibrating(self, on):
-        if on == self.calibrating:
-            return
-        self.calibrating = on
-        vis = self.isVisible(); self.hide(); self._build()
-        if vis or on:
-            self.show(); self.raise_()
-        if on:
-            self.activateWindow(); self.setFocus()
-
     def _pos(self, i):
         g = self.cfg["grid"]
         col, row = i % g["cols"], i // g["cols"]
@@ -1218,51 +1200,88 @@ class OnCardOverlay(QtWidgets.QWidget):
                 g["y0"] + row * g["dy"] - self._origin.y())
 
     def paintEvent(self, _):
-        if not self.has_cards() and not self.calibrating:
+        try:
+            self._paint()
+        except Exception:
+            import traceback; traceback.print_exc()
+
+    def _paint(self):
+        if not self.has_cards() and not self.guides:
             return
         p = QtGui.QPainter(self); p.setRenderHint(QtGui.QPainter.Antialiasing)
         cards = self.payload["ordered"] if self.has_cards() else [("", 0, None)] * 15
         best = max((wr for _, _, wr in cards if wr is not None), default=None)
         for i, (name, grp, wr) in enumerate(cards):
             x, y = self._pos(i)
-            if self.calibrating:
-                p.setPen(QtGui.QPen(QtGui.QColor(120, 200, 255, 130), 1)); p.setBrush(QtCore.Qt.NoBrush)
-                p.drawRect(x, y, 40, 22)
-            # win-rate chip
+            if self.guides:
+                p.setPen(QtGui.QPen(QtGui.QColor(110, 200, 255, 220), 2)); p.setBrush(QtCore.Qt.NoBrush)
+                p.drawRect(int(x), int(y), 44, 24)
             txt = f"{wr*100:.0f}" if wr is not None else "—"
             top = wr is not None and best is not None and abs(wr - best) < 1e-9
-            bg = QtGui.QColor(95, 200, 130, 235) if top else QtGui.QColor(20, 22, 30, 225)
+            bg = QtGui.QColor(95, 200, 130, 235) if top else QtGui.QColor(20, 22, 30, 230)
             p.setPen(QtCore.Qt.NoPen); p.setBrush(bg)
-            p.drawRoundedRect(QtCore.QRectF(x, y, 40, 22), 6, 6)
+            p.drawRoundedRect(QtCore.QRectF(x, y, 42, 22), 6, 6)
             p.setPen(QtGui.QColor(18, 20, 26) if top else QtGui.QColor(235, 238, 244))
             p.setFont(QtGui.QFont("Sans", 10, QtGui.QFont.Bold))
-            p.drawText(QtCore.QRectF(x, y, 40, 22), QtCore.Qt.AlignCenter, txt)
-        if self.calibrating:
-            p.setBrush(QtGui.QColor(15, 17, 22, 235)); p.setPen(QtCore.Qt.NoPen)
-            ox, oy = 40 + (self.cfg["grid"]["x0"] - self._origin.x()), 10
-            p.drawRoundedRect(QtCore.QRectF(20, 20, 430, 86), 8, 8)
-            p.setPen(QtGui.QColor(120, 200, 255)); p.setFont(QtGui.QFont("Sans", 11, QtGui.QFont.Bold))
-            p.drawText(34, 44, "Calibrating on-card grid")
-            p.setPen(QtGui.QColor(210, 213, 219)); p.setFont(QtGui.QFont("Sans", 9))
-            p.drawText(34, 64, "Arrows: move grid   ·   Shift+Arrows: column/row spacing")
-            p.drawText(34, 82, "Align the blue boxes to the cards   ·   Enter: save & exit")
-            g = self.cfg["grid"]
-            p.drawText(34, 100, f"x0={g['x0']} y0={g['y0']} dx={g['dx']} dy={g['dy']} cols={g['cols']}")
+            p.drawText(QtCore.QRectF(x, y, 42, 22), QtCore.Qt.AlignCenter, txt)
+
+
+class CalibrationControl(QtWidgets.QWidget):
+    """Small focusable window to nudge the on-card grid with arrow keys. The big overlay
+    stays click-through; only this little panel takes the keyboard, so the screen is usable."""
+    def __init__(self, cfg, oncard):
+        super().__init__()
+        self.cfg = cfg; self.oncard = oncard
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint
+                            | QtCore.Qt.Tool)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setFixedSize(380, 132)
+        self.move(80, 80)
+
+    def start(self):
+        self.oncard.guides = True; self.oncard.update()
+        self.show(); self.raise_(); self.activateWindow(); self.setFocus()
+
+    def finish(self):
+        save_config()
+        self.oncard.guides = False; self.oncard.update()
+        self.hide()
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self); p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.setBrush(QtGui.QColor(15, 17, 22, 240)); p.setPen(QtGui.QPen(QtGui.QColor(110, 200, 255, 120), 1))
+        p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 10, 10)
+        p.setPen(QtGui.QColor(110, 200, 255)); p.setFont(QtGui.QFont("Sans", 11, QtGui.QFont.Bold))
+        p.drawText(16, 28, "Calibrate on-card grid")
+        p.setPen(QtGui.QColor(210, 213, 219)); p.setFont(QtGui.QFont("Sans", 9))
+        p.drawText(16, 50, "Arrows: move    ·    Shift+Arrows: spacing    ·    Ctrl: fine")
+        p.drawText(16, 68, "Align the blue boxes to the cards' top-left corners")
+        p.drawText(16, 86, "Enter / Esc: save & finish")
+        g = self.cfg["grid"]
+        p.setPen(QtGui.QColor(150, 158, 175)); p.setFont(QtGui.QFont("Sans", 9, QtGui.QFont.Bold))
+        p.drawText(16, 112, f"x0={g['x0']}  y0={g['y0']}  dx={g['dx']}  dy={g['dy']}  cols={g['cols']}")
 
     def keyPressEvent(self, e):
-        if not self.calibrating:
-            return
-        g = self.cfg["grid"]; k = e.key(); shift = e.modifiers() & QtCore.Qt.ShiftModifier
-        step = 1 if (e.modifiers() & QtCore.Qt.ControlModifier) else 5
-        if k == QtCore.Qt.Key_Left:   g["dx" if shift else "x0"] -= step
-        elif k == QtCore.Qt.Key_Right: g["dx" if shift else "x0"] += step
-        elif k == QtCore.Qt.Key_Up:    g["dy" if shift else "y0"] -= step
-        elif k == QtCore.Qt.Key_Down:  g["dy" if shift else "y0"] += step
+        g = self.cfg["grid"]; k = e.key(); mods = e.modifiers()
+        shift = mods & QtCore.Qt.ShiftModifier
+        step = 1 if (mods & QtCore.Qt.ControlModifier) else 5
+        if k == QtCore.Qt.Key_Left:    g["dx" if shift else "x0"] -= step
+        elif k == QtCore.Qt.Key_Right:  g["dx" if shift else "x0"] += step
+        elif k == QtCore.Qt.Key_Up:     g["dy" if shift else "y0"] -= step
+        elif k == QtCore.Qt.Key_Down:   g["dy" if shift else "y0"] += step
         elif k in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Escape):
-            save_config(); self.set_calibrating(False); return
+            self.finish(); return
         else:
             return
-        self.update()
+        self.oncard.update(); self.update()
+
+    def mousePressEvent(self, e):
+        self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, e):
+        if getattr(self, "_drag", None) is not None:
+            self.move(e.globalPosition().toPoint() - self._drag)
 
 
 # ---------------------------------------------------------------- config + experiments
@@ -1285,12 +1304,13 @@ def set_experiment(name, value):
     save_config()
 
 
-_ONCARD = None      # set in main(); the on-card overlay instance
+_ONCARD = None      # the on-card overlay
+_CALIB = None       # the calibration control window
 
 
 def calibrate_oncard():
-    if _ONCARD is not None:
-        _ONCARD.set_calibrating(True)
+    if _CALIB is not None:
+        _CALIB.start()
 
 
 def save_config():
@@ -1327,7 +1347,7 @@ def main():
     _CONFIG.setdefault("deck", {}); _CONFIG.setdefault("opp", {}); _CONFIG.setdefault("draft", {})
     _CONFIG.setdefault("experiments", {}); _CONFIG.setdefault("oncard", {})
 
-    global _ONCARD
+    global _ONCARD, _CALIB
     app = QtWidgets.QApplication(sys.argv)
     carddb = CardDB(); imgcache = ImageCache(); mana = ManaSymbols(); ratings = Ratings()
     popup = ImagePopup(imgcache)
@@ -1339,6 +1359,7 @@ def main():
         _CONFIG["draft"]["y"] = _CONFIG["deck"].get("y", 80)
     draft = DraftPanel(carddb, imgcache, popup, _CONFIG["draft"])
     oncard = OnCardOverlay(_CONFIG["oncard"]); _ONCARD = oncard
+    _CALIB = CalibrationControl(_CONFIG["oncard"], oncard)
     reader = LogReader(args.log, carddb, ratings)
     reader.updated.connect(lambda d, o, dr: (deck.set_rows(d), opp.set_rows(o),
                                              draft.set_draft(dr), oncard.set_payload(dr)))
@@ -1358,7 +1379,7 @@ def main():
         setvis(opp, arena and not drafting)
         setvis(draft, arena and drafting)
         # on-card overlay (experimental): over the pack while drafting, or anytime when calibrating
-        show_oncard = (arena and drafting and experiment("on_card_ratings")) or oncard.calibrating
+        show_oncard = (arena and drafting and experiment("on_card_ratings")) or oncard.guides
         if show_oncard and not oncard.isVisible():
             oncard.show(); oncard.raise_()
         elif not show_oncard and oncard.isVisible():
