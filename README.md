@@ -50,16 +50,12 @@ cd mtga-linux-overlay
 ./run.sh        # first run sets up a venv + PySide6, then launches
 ```
 
-By default it reads the log from the Flatpak-Steam Proton prefix. To point it elsewhere:
+It **auto-detects** your `Player.log` and MTGA card database across Flatpak Steam, native
+Steam, and games installed on a second drive (it reads Steam's `libraryfolders.vdf`). If
+yours lives somewhere unusual, override either:
 
 ```bash
 ./run.sh --log "/path/to/Player.log"
-```
-
-If your MTGA install isn't at the default path, set `MTGA_RAW_DIR` to its
-`MTGA_Data/Downloads/Raw` folder (this is where card names come from):
-
-```bash
 MTGA_RAW_DIR="/path/to/MTGA/MTGA_Data/Downloads/Raw" ./run.sh
 ```
 
@@ -81,9 +77,10 @@ borderless fullscreen if Arena lacks the option.)
 Toggle these via right-click → **Experiments**. They're off by default and may be rough or
 need per-setup tuning:
 
-- **On-card draft ratings** — stamps win rates directly onto each card in the pack. Requires
-  calibrating to your resolution and Arena's draft layout; fragile by nature (the layout
-  reflows as you pick). *In progress.*
+- **On-card draft ratings** — stamps the 17Lands win rate directly onto each card in the pack
+  (it reproduces Arena's pack-sort to know each card's position). Working, but you calibrate
+  the grid to your resolution once: enable it, then right-click → Experiments → *Calibrate
+  on-card grid* and nudge the boxes onto the cards with the arrow keys.
 
 ## Development
 
