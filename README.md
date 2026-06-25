@@ -43,7 +43,10 @@ it's built around the things that actually work on Linux, not the ones that don'
 - Linux with a compositor that honors transparency (tested on KDE Plasma / KWin)
 - MTG Arena installed via Steam/Proton (Flatpak Steam supported)
 - Arena's **Detailed Logs (Plugin Support)** enabled (Settings → Account)
-- Python 3.9+ and `python3-venv`
+- Python 3.9+ with a working `venv` **and** `pip`. On Debian/Ubuntu:
+  `sudo apt install python3-full` — the bare `python3-venv` package may omit
+  `ensurepip` for a newer system Python (e.g. 3.13/3.14), which leaves you with a
+  pip-less venv. `run.sh` detects this and bootstraps pip itself if needed.
 - `x11-utils` (for the "show only over Arena" feature) — `sudo apt install x11-utils`
 
 ## Install & run
