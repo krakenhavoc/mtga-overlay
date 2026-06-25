@@ -47,7 +47,10 @@ it's built around the things that actually work on Linux, not the ones that don'
   `sudo apt install python3-full` — the bare `python3-venv` package may omit
   `ensurepip` for a newer system Python (e.g. 3.13/3.14), which leaves you with a
   pip-less venv. `run.sh` detects this and bootstraps pip itself if needed.
-- `x11-utils` (for the "show only over Arena" feature) — `sudo apt install x11-utils`
+- `x11-utils` and `x11-xserver-utils` — `xprop`/`xwininfo` drive the "show only over
+  Arena" feature, and `xrandr` lets panels auto-place on the monitor Arena runs on
+  (it falls back to the primary screen if `xrandr` is missing).
+  `sudo apt install x11-utils x11-xserver-utils`
 
 ## Install & run
 
