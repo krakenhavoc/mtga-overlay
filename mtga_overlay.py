@@ -102,7 +102,7 @@ ARENA_MATCH = ("mtga", "2141910", "magic")
 
 VERSION = "1.4"
 CHANGES = [
-    "1.4  full-history 17Lands data (fixes sparse ratings for older sets) + robust name matching",
+    "1.4  full-history 17Lands data + robust name matching; refresh draft as ratings load async",
     "1.3  EXPERIMENTAL on-card draft ratings: win rate stamped on each card (right-click ▸ Experiments)",
     "1.2  auto-detect Player.log and MTGA card DB across Steam install types (Flatpak/native/extra drives)",
     "1.1  experimental-features framework (right-click ▸ Experiments); draft panel position fix",
@@ -383,6 +383,9 @@ class Ratings:
     def _norm(s):
         return re.sub(r"\s+", " ", (s or "").replace("’", "'").replace("`", "'").strip().lower())
 
+    def loaded(self, setc):
+        return setc in self.data        # True once the fetch finishes (success or fail)
+
     def winrate(self, setc, name):
         if not setc:
             return None
@@ -659,10 +662,11 @@ class LogReader(QtCore.QThread):
                 time.sleep(1.0); continue
             if size < pos:
                 pos, buf = 0, ""; self.state.reset_all()
+            changed = False
             if size > pos:
                 with open(self.path, "r", encoding="utf-8", errors="replace") as f:
                     f.seek(pos); buf += f.read(); pos = f.tell()
-                last, changed = 0, False
+                last = 0
                 for obj_str, end in iter_json_objects(buf):
                     if any(k in obj_str for k in
                            ("greToClientEvent", "gameStateMessage", "deckMessage",
@@ -674,10 +678,13 @@ class LogReader(QtCore.QThread):
                     last = end
                 buf = buf[last:]
                 if len(buf) > 2_000_000: buf = buf[-500_000:]
-                if changed:
-                    self.updated.emit(self.state.remaining(self.carddb),
-                                      self.state.opponent(self.carddb),
-                                      self.state.draft_payload(self.carddb, self.ratings))
+            # keep the draft fresh while that set's 17Lands ratings load asynchronously
+            refresh = (self.state.draft is not None
+                       and not self.ratings.loaded(self.state.draft.get("set")))
+            if changed or refresh:
+                self.updated.emit(self.state.remaining(self.carddb),
+                                  self.state.opponent(self.carddb),
+                                  self.state.draft_payload(self.carddb, self.ratings))
             time.sleep(0.7)
 
 
