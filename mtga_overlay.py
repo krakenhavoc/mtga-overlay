@@ -172,6 +172,83 @@ def active_window_is_arena():
         return True
 
 
+# ------------------------------------------------ keep panels on Arena's screen
+def _xtool(args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=1).stdout
+    except Exception:
+        return ""
+
+
+def arena_window_rect():
+    """Physical (X11) geometry (x, y, w, h) of the MTG Arena window, or None.
+    Scans the whole X11 tree so it works regardless of focus, skipping our own
+    panels (whose window class also contains 'mtga'). Arena spawns many tiny
+    helper windows, so return the largest match — the actual game window."""
+    best = None
+    for line in _xtool(["xwininfo", "-root", "-tree"]).splitlines():
+        low = line.lower()
+        if "mtga_overlay" in low:
+            continue
+        if not ("steam_app_2141910" in low or '"mtga"' in low or "magic" in low):
+            continue
+        m = re.search(r"(\d+)x(\d+)\+-?\d+\+-?\d+\s+\+(-?\d+)\+(-?\d+)", line)
+        if m:
+            w, h, x, y = (int(g) for g in m.groups())
+            if w > 200 and h > 200 and (best is None or w * h > best[2] * best[3]):
+                best = (x, y, w, h)
+    return best
+
+
+def arena_screen():
+    """The Qt screen showing MTG Arena, or None if it can't be determined.
+    Arena's window position is in X11 physical pixels; Qt screen geometry is in
+    logical pixels and the two don't line up under fractional scaling — so map
+    the physical rect to a monitor *name* via xrandr, then to the Qt screen of
+    that name."""
+    rect = arena_window_rect()
+    if not rect:
+        return None
+    cx, cy = rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
+    for line in _xtool(["xrandr", "--listmonitors"]).splitlines():
+        # e.g. " 0: +*DP-1 3840/697x2160/392+4988+0  DP-1"
+        m = re.search(r":\s+\+\*?(\S+)\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)", line)
+        if not m:
+            continue
+        name, w, h, x, y = m.group(1), *(int(m.group(i)) for i in range(2, 6))
+        if x <= cx < x + w and y <= cy < y + h:
+            for s in QtWidgets.QApplication.screens():
+                if s.name() == name:
+                    return s
+            return None
+    return None
+
+
+def anchor_widget(w, screen=None):
+    """Place a panel on Arena's monitor at its saved offset within that monitor.
+    Calling setScreen() first is what makes move() honor a position on a second
+    monitor under XWayland; do it once the window is shown (has a windowHandle).
+    Falls back to the primary screen when Arena's screen is unknown."""
+    cfg = getattr(w, "cfg", None)
+    if cfg is None:
+        return
+    s = screen or arena_screen() or QtWidgets.QApplication.primaryScreen()
+    g = s.geometry()
+    h = w.windowHandle()
+    if h is not None:
+        h.setScreen(s)
+    w.move(g.x() + cfg.get("ox", 40), g.y() + cfg.get("oy", 80))
+    w._anchor_screen = s.name()
+
+
+def save_screen_offset(w):
+    """Record a panel's position as an offset within whatever screen it's on, so
+    it restores onto Arena's monitor regardless of the monitor layout."""
+    s = w.screen() or QtWidgets.QApplication.primaryScreen()
+    g = s.geometry()
+    w.cfg["ox"], w.cfg["oy"] = w.x() - g.x(), w.y() - g.y()
+
+
 # ---------------------------------------------------------------- card data
 class MtgaDB:
     """MTGA's own card database (SQLite) — authoritative, current, offline.
@@ -872,7 +949,8 @@ class CardPanel(QtWidgets.QWidget):
                             | QtCore.Qt.X11BypassWindowManagerHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setMouseTracking(True); self.setWindowOpacity(self._opacity)
-        self.move(cfg.get("x", 40 if mode == "deck" else 330), cfg.get("y", 80))
+        cfg.setdefault("ox", 40 if mode == "deck" else 330); cfg.setdefault("oy", 80)
+        self.move(cfg["ox"], cfg["oy"])   # best-effort; re-anchored to Arena's screen on show
         QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Q"), self, QtWidgets.QApplication.quit)
         self._t = QtCore.QTimer(self); self._t.timeout.connect(self.update); self._t.start(1000)
         self.relayout()
@@ -1106,7 +1184,8 @@ class CardPanel(QtWidgets.QWidget):
         self._save_cfg()
 
     def _save_cfg(self):
-        self.cfg.update({"x": self.x(), "y": self.y(), "collapsed": self.collapsed,
+        save_screen_offset(self)
+        self.cfg.update({"collapsed": self.collapsed,
                          "opacity": self._opacity, "sections": self.sections})
         save_config()
 
@@ -1130,7 +1209,8 @@ class DraftPanel(QtWidgets.QWidget):
                             | QtCore.Qt.X11BypassWindowManagerHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setMouseTracking(True); self.setWindowOpacity(self._opacity)
-        self.move(cfg.get("x", 40), cfg.get("y", 80))
+        cfg.setdefault("ox", 40); cfg.setdefault("oy", 80)
+        self.move(cfg["ox"], cfg["oy"])   # best-effort; re-anchored to Arena's screen on show
         QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Q"), self, QtWidgets.QApplication.quit)
         self._t = QtCore.QTimer(self); self._t.timeout.connect(self.update); self._t.start(1000)
         self.relayout()
@@ -1268,7 +1348,8 @@ class DraftPanel(QtWidgets.QWidget):
         self._save()
 
     def _save(self):
-        self.cfg.update({"x": self.x(), "y": self.y(), "collapsed": self.collapsed, "opacity": self._opacity})
+        save_screen_offset(self)
+        self.cfg.update({"collapsed": self.collapsed, "opacity": self._opacity})
         save_config()
 
 
@@ -1290,7 +1371,8 @@ class SourcesPanel(QtWidgets.QWidget):
                             | QtCore.Qt.X11BypassWindowManagerHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setMouseTracking(True); self.setWindowOpacity(self._opacity)
-        self.move(cfg.get("x", 40), cfg.get("y", 80))
+        cfg.setdefault("ox", 40); cfg.setdefault("oy", 80)
+        self.move(cfg["ox"], cfg["oy"])   # best-effort; re-anchored to Arena's screen on show
         QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Q"), self, QtWidgets.QApplication.quit)
         self.relayout()
 
@@ -1421,8 +1503,8 @@ class SourcesPanel(QtWidgets.QWidget):
         self._save()
 
     def _save(self):
-        self.cfg.update({"x": self.x(), "y": self.y(), "collapsed": self.collapsed,
-                         "opacity": self._opacity})
+        save_screen_offset(self)
+        self.cfg.update({"collapsed": self.collapsed, "opacity": self._opacity})
         save_config()
 
     def closeEvent(self, e):
@@ -1621,14 +1703,14 @@ def main():
     deck = CardPanel("deck", carddb, imgcache, popup, mana, _CONFIG["deck"])
     opp = CardPanel("opp", carddb, imgcache, popup, mana, _CONFIG["opp"])
     # first run: place the draft panel where the deck tracker already lives
-    if "x" not in _CONFIG["draft"] and "x" in _CONFIG["deck"]:
-        _CONFIG["draft"]["x"] = _CONFIG["deck"]["x"]
-        _CONFIG["draft"]["y"] = _CONFIG["deck"].get("y", 80)
+    if "ox" not in _CONFIG["draft"] and "ox" in _CONFIG["deck"]:
+        _CONFIG["draft"]["ox"] = _CONFIG["deck"]["ox"]
+        _CONFIG["draft"]["oy"] = _CONFIG["deck"].get("oy", 80)
     draft = DraftPanel(carddb, imgcache, popup, _CONFIG["draft"])
     # first run: place the mana-base panel where the deck tracker lives
-    if "x" not in _CONFIG["sources"] and "x" in _CONFIG["deck"]:
-        _CONFIG["sources"]["x"] = _CONFIG["deck"]["x"]
-        _CONFIG["sources"]["y"] = _CONFIG["deck"].get("y", 80)
+    if "ox" not in _CONFIG["sources"] and "ox" in _CONFIG["deck"]:
+        _CONFIG["sources"]["ox"] = _CONFIG["deck"]["ox"]
+        _CONFIG["sources"]["oy"] = _CONFIG["deck"].get("oy", 80)
     sources = SourcesPanel(_CONFIG["sources"], mana)
     oncard = OnCardOverlay(_CONFIG["oncard"]); _ONCARD = oncard
     _CALIB = CalibrationControl(_CONFIG["oncard"], oncard)
@@ -1639,20 +1721,34 @@ def main():
     reader.start()
 
     # only visible while Arena is focused; draft panel during a draft, deck/opp during a match
-    def setvis(w, v):
+    def setvis(w, v, scr):
         if v and not w.isVisible():
             w.show(); w.raise_()
+            # Anchor to Arena's monitor *after* show — move() before the window is
+            # mapped is ignored under XWayland, and setScreen() makes a cross-monitor
+            # position stick. Panels live on the monitor Arena runs on, not the primary.
+            anchor_widget(w, scr)
         elif not v and w.isVisible():
             w.hide()
 
+    last_arena_screen = [None]
+
     def update_visibility():
         arena = active_window_is_arena()
+        scr = arena_screen() if arena else None
         drafting = draft.has_cards()
         in_builder = sources.in_builder()
-        setvis(deck, arena and not drafting and not in_builder)
-        setvis(opp, arena and not drafting and not in_builder)
-        setvis(draft, arena and drafting)
-        setvis(sources, arena and in_builder)
+        setvis(deck, arena and not drafting and not in_builder, scr)
+        setvis(opp, arena and not drafting and not in_builder, scr)
+        setvis(draft, arena and drafting, scr)
+        setvis(sources, arena and in_builder, scr)
+        # follow Arena across monitors: if it moved to a different screen, re-anchor
+        # whatever is on-screen (a no-op while it stays put, so it won't fight drags)
+        if scr is not None and scr.name() != last_arena_screen[0]:
+            last_arena_screen[0] = scr.name()
+            for w in (deck, opp, draft, sources):
+                if w.isVisible():
+                    anchor_widget(w, scr)
         # on-card overlay (experimental): over the pack while drafting, or anytime when calibrating
         show_oncard = (arena and drafting and experiment("on_card_ratings")) or oncard.guides
         if show_oncard and not oncard.isVisible():
