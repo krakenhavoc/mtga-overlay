@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.5.1
+- Library/Opponent panels now appear only during an active match, not on the home/menu screens (tracks the match lifecycle from start to MatchCompleted, surviving between-game resets in best-of-three)
+
 ## 1.5
 - Deck-builder **mana base** panel: per-color count of land sources, shown while you edit a deck
 - Sources are parsed from each land's actual mana abilities (duals count for both colors; "any color" and "becomes a basic land type" lands count for all five), not guessed from color identity

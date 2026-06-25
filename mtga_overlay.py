@@ -100,8 +100,9 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 # window classes that count as "Arena" for show-only-over-Arena behavior
 ARENA_MATCH = ("mtga", "2141910", "magic")
 
-VERSION = "1.5"
+VERSION = "1.5.1"
 CHANGES = [
+    "1.5.1  Library/Opponent panels show only during an active match (tracks match start → MatchCompleted)",
     "1.5  deck-builder mana base: per-color land source counts (parsed from each land's actual mana abilities)",
     "1.4  full-history 17Lands data + robust name matching; refresh draft as ratings load async",
     "1.3  EXPERIMENTAL on-card draft ratings: win rate stamped on each card (right-click ▸ Experiments)",
@@ -674,6 +675,7 @@ class MatchState:
         self.draft = None
         self.scene = None            # last UI scene (e.g. "DeckBuilder")
         self.builder = None          # deck currently open in the deck builder
+        self.in_match = False        # True only between match start and MatchCompleted
         self.reset_game()
 
     def reset_game(self):
@@ -686,7 +688,16 @@ class MatchState:
             if node.get("type") == "GREMessageType_ConnectResp" and node.get("systemSeatIds"):
                 self.my_seat = node["systemSeatIds"][0]
                 self.draft = None                      # entered a match -> not drafting
-                self.reset_game()
+                self.in_match = True                   # also covers reconnect to an in-progress match
+                self.reset_game(); changed = True
+            # match lifecycle: only show match panels between "Playing" and "MatchCompleted"
+            gr = node.get("matchGameRoomStateChangedEvent")
+            if isinstance(gr, dict):
+                st = (gr.get("gameRoomInfo") or {}).get("stateType")
+                if st == "MatchGameRoomStateType_Playing" and not self.in_match:
+                    self.in_match = True; changed = True
+                elif st == "MatchGameRoomStateType_MatchCompleted" and self.in_match:
+                    self.in_match = False; changed = True
             # UI scene tracking (so the mana-base panel only shows in the deck builder)
             sc = node.get("toSceneName")
             if sc and sc != self.scene:
@@ -810,7 +821,7 @@ class MatchState:
                 "nonland": nonland, "total": sum(ids.values())}
 
     def view(self, carddb):
-        return {"scene": self.scene, "data": self.sources(carddb)}
+        return {"scene": self.scene, "in_match": self.in_match, "data": self.sources(carddb)}
 
 
 class LogReader(QtCore.QThread):
@@ -838,7 +849,8 @@ class LogReader(QtCore.QThread):
                 for obj_str, end in iter_json_objects(buf):
                     if any(k in obj_str for k in
                            ("greToClientEvent", "gameStateMessage", "deckMessage",
-                            "systemSeatIds", "BotDraft", "MainDeck", "toSceneName")):
+                            "systemSeatIds", "BotDraft", "MainDeck", "toSceneName",
+                            "matchGameRoomStateChangedEvent")):
                         try:
                             changed |= self.state.feed(json.loads(obj_str), self.carddb)
                         except Exception:
@@ -1715,9 +1727,13 @@ def main():
     oncard = OnCardOverlay(_CONFIG["oncard"]); _ONCARD = oncard
     _CALIB = CalibrationControl(_CONFIG["oncard"], oncard)
     reader = LogReader(args.log, carddb, ratings)
-    reader.updated.connect(lambda d, o, dr, vw: (deck.set_rows(d), opp.set_rows(o),
-                                                 draft.set_draft(dr), oncard.set_payload(dr),
-                                                 sources.set_view(vw)))
+    flags = {"in_match": False}
+
+    def on_update(d, o, dr, vw):
+        flags["in_match"] = bool(vw and vw.get("in_match"))
+        deck.set_rows(d); opp.set_rows(o); draft.set_draft(dr)
+        oncard.set_payload(dr); sources.set_view(vw)
+    reader.updated.connect(on_update)
     reader.start()
 
     # only visible while Arena is focused; draft panel during a draft, deck/opp during a match
@@ -1738,10 +1754,11 @@ def main():
         scr = arena_screen() if arena else None
         drafting = draft.has_cards()
         in_builder = sources.in_builder()
-        setvis(deck, arena and not drafting and not in_builder, scr)
-        setvis(opp, arena and not drafting and not in_builder, scr)
+        in_match = flags["in_match"]
+        setvis(deck, arena and in_match and not drafting, scr)
+        setvis(opp, arena and in_match and not drafting, scr)
         setvis(draft, arena and drafting, scr)
-        setvis(sources, arena and in_builder, scr)
+        setvis(sources, arena and in_builder and not in_match, scr)
         # follow Arena across monitors: if it moved to a different screen, re-anchor
         # whatever is on-screen (a no-op while it stays put, so it won't fight drags)
         if scr is not None and scr.name() != last_arena_screen[0]:
