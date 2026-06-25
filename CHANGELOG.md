@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3
+- EXPERIMENTAL on-card draft ratings (win rate stamped on each card, with calibration)
+
+## 1.2
+- Auto-detect Player.log and MTGA card DB across Steam install types
+
 ## 1.1
 - Experimental-features framework (right-click ▸ Experiments)
 - Draft panel now defaults to the deck tracker's position
