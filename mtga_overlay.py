@@ -100,8 +100,9 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 # window classes that count as "Arena" for show-only-over-Arena behavior
 ARENA_MATCH = ("mtga", "2141910", "magic")
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 CHANGES = [
+    "1.5.2  draft overlay now works for Premier/human/Pick-Two drafts (Draft.Notify packs), not just Quick Draft; set auto-detected from the cards",
     "1.5.1  Library/Opponent panels show only during an active match (tracks match start → MatchCompleted)",
     "1.5  deck-builder mana base: per-color land source counts (parsed from each land's actual mana abilities)",
     "1.4  full-history 17Lands data + robust name matching; refresh draft as ratings load async",
@@ -324,11 +325,11 @@ class MtgaDB:
             with self.lock:
                 cur = self.con.cursor()
                 row = cur.execute("SELECT TitleId,Types,ColorIdentity,OldSchoolManaText,"
-                                  "Rarity,Colors,CollectorNumber,AbilityIds "
+                                  "Rarity,Colors,CollectorNumber,AbilityIds,ExpansionCode "
                                   "FROM Cards WHERE GrpId=?", (grp,)).fetchone()
                 if not row:
                     return None
-                tid, types, ci, m, rarity, colors, cn, abil = row
+                tid, types, ci, m, rarity, colors, cn, abil, exp = row
                 nm = cur.execute("SELECT Loc FROM Localizations_enUS WHERE LocId=? "
                                  "ORDER BY Formatted LIMIT 1", (tid,)).fetchone()
                 tv = set(int(x) for x in (types or "").split(",") if x.strip().isdigit())
@@ -347,7 +348,7 @@ class MtgaDB:
         return {"name": nm[0] if nm else f"#{grp}", "ci": cil,
                 "type": typ, "cmc": cmc, "mana": ms, "img": None,
                 "rarity": int(rarity or 0), "colors": colors or "", "cn": cnv,
-                "prod": prod}
+                "prod": prod, "set": (exp or "").upper()}
 
 
 class CardDB:
@@ -372,8 +373,8 @@ class CardDB:
     def card(self, aid):
         c = self.cards.get(aid)
         # re-resolve placeholders AND old-format entries missing newer fields
-        # (rarity = draft sort; prod = mana sources)
-        if c and not c["name"].startswith("#") and "rarity" in c and "prod" in c:
+        # (rarity = draft sort; prod = mana sources; set = draft set detection)
+        if c and not c["name"].startswith("#") and "rarity" in c and "prod" in c and "set" in c:
             return c
         mc = self.mtga.lookup(aid)                # MTGA DB: upgrades #id + stale entries
         if mc:
@@ -702,6 +703,8 @@ class MatchState:
             sc = node.get("toSceneName")
             if sc and sc != self.scene:
                 self.scene = sc; changed = True
+                if sc == "DeckBuilder" and self.draft:
+                    self.draft = None        # draft finished -> stop showing the pack panel
             # deck currently being edited/saved in the deck builder (auto-saved as DeckUpsertDeckV3)
             req = node.get("request")
             if isinstance(req, str) and "MainDeck" in req:
@@ -721,6 +724,24 @@ class MatchState:
                     fmt = next((a.get("value", "") for a in (summ.get("Attributes") or [])
                                 if a.get("name") == "Format"), "")
                     self.builder = {"name": summ.get("Name", ""), "format": fmt, "ids": ids}
+                    changed = True
+            # premier / human / pick-two drafts: the pack arrives as Draft.Notify
+            # ({"PackCards":"id,id,…","SelfPack":n,"SelfPick":n}). The set is read from
+            # the cards themselves (their expansion code), so it's right for any draft type.
+            pc = node.get("PackCards")
+            if isinstance(pc, str) and pc:
+                ids = [int(x) for x in pc.split(",") if x.strip().isdigit()]
+                if ids:
+                    sc = Counter()
+                    for i in ids:
+                        cc = carddb.card(i)
+                        if cc and cc.get("set"):
+                            sc[cc["set"]] += 1
+                    setc = sc.most_common(1)[0][0] if sc else ""
+                    self.draft = {"set": setc,
+                                  "pack_num": (node.get("SelfPack") or 1) - 1,
+                                  "pick_num": node.get("SelfPick") or 1,
+                                  "pack": ids}
                     changed = True
             if node.get("CurrentModule") == "BotDraft" and isinstance(node.get("Payload"), str):
                 try:
@@ -850,7 +871,7 @@ class LogReader(QtCore.QThread):
                     if any(k in obj_str for k in
                            ("greToClientEvent", "gameStateMessage", "deckMessage",
                             "systemSeatIds", "BotDraft", "MainDeck", "toSceneName",
-                            "matchGameRoomStateChangedEvent")):
+                            "matchGameRoomStateChangedEvent", "PackCards")):
                         try:
                             changed |= self.state.feed(json.loads(obj_str), self.carddb)
                         except Exception:

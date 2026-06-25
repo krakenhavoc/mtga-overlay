@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.2
+- Draft overlay now works for Premier, Traditional, and Pick-Two drafts (parsed from `Draft.Notify` packs), not just Quick Draft
+- Draft set is auto-detected from the cards in the pack, so 17Lands ratings load correctly for any draft type
+
 ## 1.5.1
 - Library/Opponent panels now appear only during an active match, not on the home/menu screens (tracks the match lifecycle from start to MatchCompleted, surviving between-game resets in best-of-three)
 
